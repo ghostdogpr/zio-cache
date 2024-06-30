@@ -1,13 +1,19 @@
-import Versions._
-import BuildHelper._
+import Versions.*
+import BuildHelper.*
+import zio.sbt.githubactions.Step
 
 enablePlugins(ZioSbtEcosystemPlugin, ZioSbtCiPlugin)
 
+lazy val scala212V = "2.12.19"
+lazy val scala213V = "2.13.14"
+lazy val scala3V   = "3.3.3"
+lazy val allScalas = List("2.12", "2.13", "3.3")
+
 inThisBuild(
   List(
-    name := "ZIO Cache",
-    crossScalaVersions -= scala3.value,
-    sbtBuildOptions  := List("-J-XX:+UseG1GC", "-J-Xmx4g", "-J-Xms2g", "-J-Xss16m"),
+    name             := "ZIO Cache",
+    zioVersion       := "2.1.4",
+    scalaVersion     := scala213V,
     ciBackgroundJobs := Seq("free --si -tmws 10"),
     developers := List(
       Developer(
@@ -18,12 +24,13 @@ inThisBuild(
       )
     ),
     ciEnabledBranches := Seq("series/2.x"),
-    supportedScalaVersions :=
-      Map(
-        (zioCacheJVM / thisProject).value.id    -> (zioCacheJVM / crossScalaVersions).value,
-        (zioCacheJS / thisProject).value.id     -> (zioCacheJS / crossScalaVersions).value,
-        (zioCacheNative / thisProject).value.id -> (zioCacheNative / crossScalaVersions).value
-      )
+    ciTargetJavaVersions := List("11", "21"),
+    ciTargetScalaVersions := Map(
+      (zioCacheJVM / thisProject).value.id    -> allScalas,
+      (zioCacheJS / thisProject).value.id     -> allScalas,
+      (zioCacheNative / thisProject).value.id -> allScalas
+    ),
+    versionScheme := Some("early-semver")
   )
 )
 
@@ -32,7 +39,8 @@ addCommandAlias("benchmark", "benchmarks/Jmh/run")
 lazy val root = project
   .in(file("."))
   .settings(
-    publish / skip := true,
+    publish / skip     := true,
+    crossScalaVersions := Seq(),
     unusedCompileDependenciesFilter -= moduleFilter("org.scala-js", "scalajs-library")
   )
   .aggregate(
@@ -46,35 +54,53 @@ lazy val root = project
 lazy val zioCache = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .in(file("zio-cache"))
   .settings(
-    stdSettings(name = "zio-cache", packageName = Some("zio.cache"), enableCrossProject = true),
+    crossScalaVersions := List(scala212V, scala213V, scala3V),
+    stdSettings(name = Some("zio-cache"), packageName = Some("zio.cache"), enableCrossProject = true),
     silencerSettings,
     enableZIO(),
     libraryDependencies ++= Seq(
       "org.scala-lang.modules" %% "scala-collection-compat" % ScalaCollectionCompatVersion
-    )
+    ),
+    scalacOptions ++= Seq(
+      "-release",
+      "11"
+    ),
+    scalacOptions ++=
+      (if (scalaBinaryVersion.value == "3")
+         Seq()
+       else
+         Seq(
+           "-opt:l:method",
+           "-opt:l:inline",
+           "-opt-inline-from:scala.**"
+         ))
   )
-
-lazy val zioCacheJS = zioCache.js
-  .settings(crossScalaVersions -= scala211.value, scalaJSUseMainModuleInitializer := true)
 
 lazy val zioCacheJVM = zioCache.jvm
   .settings(
-    crossScalaVersions += scala3.value,
     scala3Settings,
-    scalaReflectTestSettings
+    scalaReflectTestSettings,
+    enableMimaSettingsJVM
+  )
+
+lazy val zioCacheJS = zioCache.js
+  .settings(
+    scalaJSUseMainModuleInitializer := true,
+    enableMimaSettingsJS
   )
 
 lazy val zioCacheNative = zioCache.native
   .settings(
     nativeSettings,
-    crossScalaVersions -= scala211.value
+    enableMimaSettingsNative
   )
 
 lazy val benchmarks = project
   .in(file("zio-cache-benchmarks"))
-  .settings(stdSettings(name = "zio-cache-benchmarks", packageName = Some("zio.cache")))
+  .settings(stdSettings(name = Some("zio-cache-benchmarks"), packageName = Some("zio.cache")))
   .settings(
-    publish / skip := true
+    crossScalaVersions := List(scala213V, scala3V),
+    publish / skip     := true
   )
   .dependsOn(zioCacheJVM)
   .enablePlugins(JmhPlugin)
@@ -85,12 +111,43 @@ lazy val docs = project
     moduleName := "zio-cache-docs",
     scalacOptions -= "-Yno-imports",
     scalacOptions -= "-Xfatal-warnings",
-    crossScalaVersions -= scala211.value,
     projectName                                := (ThisBuild / name).value,
     mainModuleName                             := (zioCacheJVM / moduleName).value,
     projectStage                               := ProjectStage.Development,
     ScalaUnidoc / unidoc / unidocProjectFilter := inProjects(zioCacheJVM),
+    crossScalaVersions                         := List(scala213V),
     publish / skip                             := true
   )
   .dependsOn(zioCacheJVM)
   .enablePlugins(WebsitePlugin)
+
+lazy val enforceMimaCompatibility = true // Enable / disable failing CI on binary incompatibilities
+
+lazy val enableMimaSettingsJVM =
+  Def.settings(
+    mimaFailOnProblem     := enforceMimaCompatibility,
+    mimaPreviousArtifacts := previousStableVersion.value.map(organization.value %% moduleName.value % _).toSet,
+    mimaBinaryIssueFilters ++= Seq()
+  )
+
+lazy val enableMimaSettingsJS =
+  Def.settings(
+    mimaFailOnProblem     := enforceMimaCompatibility,
+    mimaPreviousArtifacts := previousStableVersion.value.map(organization.value %%% moduleName.value % _).toSet,
+    mimaBinaryIssueFilters ++= Seq()
+  )
+
+lazy val enableMimaSettingsNative =
+  Def.settings(
+    mimaFailOnProblem     := enforceMimaCompatibility,
+    mimaPreviousArtifacts := previousStableVersion.value.map(organization.value %%% moduleName.value % _).toSet,
+    mimaBinaryIssueFilters ++= Seq()
+  )
+
+ThisBuild / ciCheckArtifactsBuildSteps +=
+  Step.SingleStep(
+    "Check binary compatibility",
+    run = Some(
+      "sbt \"+zioCacheJVM/mimaReportBinaryIssues; zioCacheJS/mimaReportBinaryIssues; zioCacheNative/mimaReportBinaryIssues\""
+    )
+  )
