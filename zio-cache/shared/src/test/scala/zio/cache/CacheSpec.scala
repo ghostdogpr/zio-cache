@@ -2,7 +2,7 @@ package zio.cache
 
 import zio.test.Assertion._
 import zio.test._
-import zio.{Duration, Ref, Scope, UIO, ZIO, duration2DurationOps}
+import zio._
 
 object CacheSpec extends ZIOSpecDefault {
 
@@ -142,6 +142,14 @@ object CacheSpec extends ZIOSpecDefault {
           size  <- cache.size
         } yield assertTrue(size == 10)
       }
-    }
+    },
+    test("ensure get is not hanging when we interrupt right after a get in another fiber") {
+      for {
+        cache <- Cache.make(10, Duration.Infinity, Lookup((_: Unit) => ZIO.succeed(1)))
+        task1  = (cache.invalidate(()) *> cache.get(())).fork.flatMap(_.interrupt)
+        _     <- ZIO.forkAll(List.fill(1000)(task1))
+        _     <- cache.get(()).exit.timeoutFail("hanging")(3.seconds).forever.timeout(7.seconds)
+      } yield assertCompletes
+    } @@ TestAspect.withLiveClock
   )
 }

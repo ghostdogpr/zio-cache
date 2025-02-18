@@ -305,8 +305,7 @@ object Cache {
                     map.put(key, MapValue.Complete(new MapKey(key), exit, entryStats, now.plus(timeToLive(exit))))
                     promise.done(exit) *> ZIO.done(exit)
                   }
-                  .onInterrupt(promise.interrupt *> ZIO.succeed(map.remove(key)))
-              }
+              }.onInterrupt(promise.interrupt *> ZIO.succeed(map.remove(keyBy(in))))
 
             private def newPromise()(implicit unsafe: Unsafe) =
               Promise.unsafe.make[Error, Value](fiberId)
