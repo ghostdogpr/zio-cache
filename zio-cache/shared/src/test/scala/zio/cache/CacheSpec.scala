@@ -1,13 +1,16 @@
 package zio.cache
 
+import zio._
 import zio.test.Assertion._
 import zio.test._
-import zio._
 
 object CacheSpec extends ZIOSpecDefault {
 
   def hash(x: Int): Int => UIO[Int] =
     y => ZIO.succeed((x ^ y).hashCode)
+
+  val identity: Int => UIO[Int] =
+    ZIO.succeed(_)
 
   def spec: Spec[TestEnvironment with Scope, Any] = suite("CacheSpec")(
     test("cacheStats") {
@@ -150,6 +153,18 @@ object CacheSpec extends ZIOSpecDefault {
         _     <- ZIO.forkAll(List.fill(1000)(task1))
         _     <- cache.get(()).exit.timeoutFail("hanging")(3.seconds).forever.timeout(7.seconds)
       } yield assertCompletes
-    } @@ TestAspect.withLiveClock
+    } @@ TestAspect.withLiveClock,
+    test("cache hits should not be incremented for expired entries") {
+      for {
+        cache      <- Cache.make(100, 1.second, Lookup(identity))
+        _          <- cache.get(42)
+        _          <- TestClock.adjust(2.seconds)
+        _          <- cache.get(42)
+        cacheStats <- cache.cacheStats
+        hits        = cacheStats.hits
+        misses      = cacheStats.misses
+      } yield assertTrue(hits == 0L) &&
+        assertTrue(misses == 2L)
+    }
   )
 }
